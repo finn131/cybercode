@@ -186,10 +186,14 @@ function findBinary(startDir) {
   }
 }
 
-const resolved = envPath || (fs.existsSync(cached) ? cached : findBinary(scriptDir))
+// Local dev build produced by `bun run script/build.ts`, preferred over an npm platform package.
+const localBuild = path.join(scriptDir, "..", "dist", base, "bin", binary)
+
+const resolved =
+  envPath || (fs.existsSync(cached) ? cached : fs.existsSync(localBuild) ? localBuild : findBinary(scriptDir))
 if (!resolved) {
   console.error(
-    "It seems that your package manager failed to install the right version of the opencode CLI for your platform. You can try manually installing " +
+    "It seems that your package manager failed to install the right version of the cybercode CLI for your platform. You can try manually installing " +
       names.map((n) => `\"${n}\"`).join(" or ") +
       " package",
   )

@@ -270,6 +270,9 @@ const layer = Layer.effect(
         }
       }
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "cybercode.json"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "cybercode.jsonc"), env))
+      // Legacy names from the upstream opencode install, kept as a migration path.
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
 
