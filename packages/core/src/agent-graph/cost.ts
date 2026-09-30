@@ -9,6 +9,12 @@ import { AgentGraph } from "./graph"
 
 export interface Usage {
   readonly cost: number
+  /**
+   * Settled provider turns for this node. Unlike the runner's `currentStep`, this
+   * only ever grows: a steer resets turn-local state but emits no step event, so
+   * no steering path can roll accounting back.
+   */
+  readonly turns: number
   readonly tokens: {
     readonly input: number
     readonly output: number
@@ -19,11 +25,13 @@ export interface Usage {
 
 const zero = (): Usage => ({
   cost: 0,
+  turns: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
 })
 
 const add = (a: Usage, b: Usage): Usage => ({
   cost: a.cost + b.cost,
+  turns: a.turns + b.turns,
   tokens: {
     input: a.tokens.input + b.tokens.input,
     output: a.tokens.output + b.tokens.output,
@@ -51,6 +59,7 @@ export function reduce(current: ReadonlyMap<SessionSchema.ID, Usage>, event: Ste
     event.data.sessionID,
     add(next.get(event.data.sessionID) ?? zero(), {
       cost: event.data.cost,
+      turns: 1,
       tokens: {
         input: event.data.tokens.input,
         output: event.data.tokens.output,

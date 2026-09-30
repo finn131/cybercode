@@ -3,6 +3,7 @@ export * as LifecycleTools from "./lifecycle"
 import { ToolFailure } from "@opencode-ai/llm"
 import { Effect, Layer, Schema } from "effect"
 import { AgentGraph } from "../agent-graph/graph"
+import { AgentHalt } from "../agent-graph/halt"
 import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
 import { Tool } from "./tool"
@@ -32,6 +33,7 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const tools = yield* Tools.Service
     const graph = yield* AgentGraph.Service
+    const halt = yield* AgentHalt.Service
     const config = yield* Config.Service
     if (!Config.latest(yield* config.entries(), "agent_graph")?.enabled) return
 
@@ -46,6 +48,7 @@ const layer = Layer.effectDiscard(
           execute: (input, context) =>
             Effect.gen(function* () {
               yield* graph.setStatus(context.sessionID, "completed")
+              yield* halt.request(context.sessionID, "finished")
               return { agent_completed: true, summary: input.summary }
             }).pipe(Effect.mapError(() => new ToolFailure({ message: "This session is not an agent-graph node" }))),
         }),
@@ -58,6 +61,7 @@ const layer = Layer.effectDiscard(
           execute: (input, context) =>
             Effect.gen(function* () {
               yield* graph.setStatus(context.sessionID, "completed")
+              yield* halt.request(context.sessionID, "finished")
               return { scan_completed: true, summary: input.summary }
             }).pipe(Effect.mapError(() => new ToolFailure({ message: "This session is not an agent-graph node" }))),
         }),
@@ -69,5 +73,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/lifecycle",
   layer,
-  deps: [ToolRegistry.node, AgentGraph.node, Config.node],
+  deps: [ToolRegistry.node, AgentGraph.node, AgentHalt.node, Config.node],
 })

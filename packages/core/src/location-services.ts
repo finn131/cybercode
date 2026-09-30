@@ -2,6 +2,7 @@ import { Effect, Layer, LayerMap } from "effect"
 import { AgentV2 } from "./agent"
 import { AgentCost } from "./agent-graph/cost"
 import { AgentGraph } from "./agent-graph/graph"
+import { AgentHalt } from "./agent-graph/halt"
 import { AISDK } from "./aisdk"
 import { Catalog } from "./catalog"
 import { CommandV2 } from "./command"
@@ -76,6 +77,7 @@ export const locationServices = LayerNode.group([
   QuestionV2.node,
   ReadToolFileSystem.node,
   AgentGraph.node,
+  AgentHalt.node,
   AgentCost.node,
   LifecycleTools.node,
   BuiltInTools.node,

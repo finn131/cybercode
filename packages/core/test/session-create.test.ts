@@ -15,13 +15,14 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { AgentMessage } from "@opencode-ai/core/agent-graph/message"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionEvent } from "@opencode-ai/core/session/event"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionInputTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
@@ -116,6 +117,39 @@ describe("SessionV2.create", () => {
       const session = yield* SessionV2.Service
 
       expect((yield* session.create({ location })).parentID).toBeUndefined()
+    }),
+  )
+
+  it.effect("delivers an agent-to-agent message through the prompt inbox", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const database = yield* Database.Service
+      const parent = yield* session.create({ location })
+      const child = yield* session.create({ location, parentID: parent.id })
+
+      const sent = yield* AgentMessage.send(
+        (input) => session.prompt(input),
+        {
+          to: child.id,
+          from: parent.id,
+          fromName: "root",
+          kind: "result",
+          text: "445/tcp open",
+        },
+      )
+
+      const rows = yield* database.db
+        .select()
+        .from(SessionInputTable)
+        .where(eq(SessionInputTable.session_id, child.id))
+        .all()
+      expect(rows).toHaveLength(1)
+      expect(rows[0].delivery).toBe("steer")
+      expect(rows[0].id).toBe(sent.messageID)
+      expect(rows[0].prompt.text).toBe(
+        `[Message from root (${parent.id}) | type=result | priority=normal]\n445/tcp open`,
+      )
+      expect(yield* SessionInput.hasPending(database.db, child.id, "steer")).toBe(true)
     }),
   )
 

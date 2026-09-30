@@ -156,6 +156,7 @@ describe("AgentCost reducer", () => {
     Effect.gen(function* () {
       expect(AgentCost.start()).toEqual({
         cost: 0,
+        turns: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       })
     }),
@@ -169,6 +170,7 @@ describe("AgentCost reducer", () => {
 
       expect(usage.get(id("ses_a"))).toEqual({
         cost: 0.75,
+        turns: 2,
         tokens: { input: 15, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       })
     }),
@@ -183,6 +185,41 @@ describe("AgentCost reducer", () => {
       expect(usage.get(id("ses_a"))?.cost).toBe(1)
       expect(usage.get(id("ses_b"))?.cost).toBe(2)
       expect(usage.size).toBe(2)
+    }),
+  )
+
+  it.effect("counts a replayed step once", () =>
+    Effect.sync(() => {
+      const event = stepEnded("ses_a", "evt_1", 2, 4)
+      const seen = new Set<string>()
+      const guard = (current: ReadonlyMap<SessionSchema.ID, AgentCost.Usage>) => {
+        if (seen.has(event.id)) return current
+        seen.add(event.id)
+        return AgentCost.reduce(current, event)
+      }
+
+      const once = guard(new Map())
+      expect(once.get(id("ses_a"))?.turns).toBe(1)
+      expect(guard(once).get(id("ses_a"))?.turns).toBe(1)
+    }),
+  )
+
+  it.effect("accumulates across turns without any reset hook", () =>
+    // Accounting is a pure fold over step events, so a steer that resets the
+    // runner's turn-local `currentStep` has no path to roll it back.
+    Effect.sync(() => {
+      let usage: ReadonlyMap<SessionSchema.ID, AgentCost.Usage> = new Map()
+      usage = AgentCost.reduce(usage, stepEnded("ses_a", "evt_1", 5, 100))
+      usage = AgentCost.reduce(usage, stepEnded("ses_a", "evt_2", 5, 100))
+
+      const beforeSteer = usage.get(id("ses_a"))
+      expect(beforeSteer?.cost).toBe(10)
+      expect(beforeSteer?.turns).toBe(2)
+
+      usage = AgentCost.reduce(usage, stepEnded("ses_a", "evt_3", 5, 100))
+      expect(usage.get(id("ses_a"))?.cost).toBe(15)
+      expect(usage.get(id("ses_a"))?.tokens.input).toBe(300)
+      expect(usage.get(id("ses_a"))?.turns).toBe(3)
     }),
   )
 
