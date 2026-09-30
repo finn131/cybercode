@@ -17,4 +17,6 @@ if (process.versions.bun !== expectedBunVersion) {
   console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
 }
 '
-bun typecheck
+# ponytail: turbo fans out one tsgo per package and OOMs this 8GB box. Raise
+# concurrency only on bigger runners.
+bun typecheck --concurrency=2
