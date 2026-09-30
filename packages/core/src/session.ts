@@ -81,6 +81,8 @@ type CreateInput = {
   agent?: AgentV2.ID
   model?: ModelV2.Ref
   location: Location.Ref
+  /** Agent-graph parent. The projector already persists this onto `session.parent_id`. */
+  parentID?: SessionSchema.ID
 }
 
 type CompactInput = {
@@ -91,6 +93,13 @@ type CompactInput = {
 export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Session.NotFoundError", {
   sessionID: SessionSchema.ID,
 }) {}
+
+export class ParentNotFoundError extends Schema.TaggedErrorClass<ParentNotFoundError>()(
+  "Session.ParentNotFoundError",
+  {
+    sessionID: SessionSchema.ID,
+  },
+) {}
 
 export class OperationUnavailableError extends Schema.TaggedErrorClass<OperationUnavailableError>()(
   "Session.OperationUnavailableError",
@@ -112,7 +121,7 @@ export type Error = NotFoundError | MessageDecodeError | OperationUnavailableErr
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
-  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
+  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, ParentNotFoundError>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
@@ -209,6 +218,8 @@ const layer = Layer.effect(
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
         if (recorded) return recorded
+        if (input.parentID && !(yield* store.get(input.parentID)))
+          return yield* new ParentNotFoundError({ sessionID: input.parentID })
         const project = yield* projects.resolve(input.location.directory)
         yield* db
           .insert(ProjectTable)
@@ -224,6 +235,7 @@ const layer = Layer.effect(
           projectID: project.id,
           directory: input.location.directory,
           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
+          parentID: input.parentID,
           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
           title: `New session - ${new Date(now).toISOString()}`,
           agent: input.agent,

@@ -11,6 +11,7 @@ import { Location } from "./location"
 import { Policy } from "./policy"
 import { AbsolutePath } from "./schema"
 import { ConfigAgent } from "./config/agent"
+import { ConfigAgentGraph } from "./config/agent-graph"
 import { ConfigAttachments } from "./config/attachments"
 import { ConfigCompaction } from "./config/compaction"
 import { ConfigCommand } from "./config/command"
@@ -83,6 +84,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   mcp: ConfigMCP.Info.pipe(Schema.optional).annotate({
     description: "MCP server configuration",
+  }),
+  agent_graph: ConfigAgentGraph.Info.pipe(Schema.optional).annotate({
+    description: "Multi-agent graph behavior. Enables lifecycle tools for scoped runs",
   }),
   compaction: ConfigCompaction.Info.pipe(Schema.optional).annotate({
     description: "Conversation compaction behavior",

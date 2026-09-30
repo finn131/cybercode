@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Effect, Layer, Stream } from "effect"
+import { Effect, Exit, Layer, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
@@ -90,6 +90,43 @@ describe("SessionV2.create", () => {
           model,
         }),
       ).toMatchObject({ location: { directory: location.directory, workspaceID }, agent: "build", model })
+    }),
+  )
+
+  it.effect("persists a graph parent onto the projected row", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const database = yield* Database.Service
+      const parent = yield* session.create({ location })
+
+      const child = yield* session.create({ location, parentID: parent.id })
+
+      expect(child.parentID).toBe(parent.id)
+      const row = yield* database.db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.id, child.id))
+        .get()
+      expect(row?.parent_id).toBe(parent.id)
+    }),
+  )
+
+  it.effect("leaves parentID undefined for a root session", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+
+      expect((yield* session.create({ location })).parentID).toBeUndefined()
+    }),
+  )
+
+  it.effect("refuses to attach a child to a parent that does not exist", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+
+      const exit = yield* session.create({ location, parentID: SessionV2.ID.create() }).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect((yield* session.list()).some((item) => item.parentID !== undefined)).toBe(false)
     }),
   )
 

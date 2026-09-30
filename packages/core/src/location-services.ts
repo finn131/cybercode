@@ -1,5 +1,7 @@
 import { Effect, Layer, LayerMap } from "effect"
 import { AgentV2 } from "./agent"
+import { AgentCost } from "./agent-graph/cost"
+import { AgentGraph } from "./agent-graph/graph"
 import { AISDK } from "./aisdk"
 import { Catalog } from "./catalog"
 import { CommandV2 } from "./command"
@@ -33,6 +35,7 @@ import { Snapshot } from "./snapshot"
 import { SystemContextBuiltIns } from "./system-context/builtins"
 import { SystemContextRegistry } from "./system-context/registry"
 import { BuiltInTools } from "./tool/builtins"
+import { LifecycleTools } from "./tool/lifecycle"
 import { ReadToolFileSystem } from "./tool/read-filesystem"
 import { ToolRegistry } from "./tool/registry"
 import { ToolOutputStore } from "./tool-output-store"
@@ -72,6 +75,9 @@ export const locationServices = LayerNode.group([
   SessionTodo.node,
   QuestionV2.node,
   ReadToolFileSystem.node,
+  AgentGraph.node,
+  AgentCost.node,
+  LifecycleTools.node,
   BuiltInTools.node,
   SessionRunnerModel.node,
   Snapshot.node,
