@@ -143,7 +143,7 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const location = yield* Location.Service
     const policy = yield* Policy.Service
-    const names = ["opencode.json", "opencode.jsonc"]
+    const names = ["cybercode.json", "cybercode.jsonc", "opencode.json", "opencode.jsonc"]
     const decodeOptions = { errors: "all", onExcessProperty: "ignore", propertyOrder: "original" } as const
     const decodeInfo = Schema.decodeUnknownOption(Info, decodeOptions)
     const decodeV1Info = Schema.decodeUnknownOption(ConfigV1.Info, decodeOptions)
@@ -156,11 +156,21 @@ const layer = Layer.effect(
       const input: unknown = parse(text, errors, { allowTrailingComma: true })
       if (errors.length) return
 
-      const info = Option.getOrUndefined(
-        ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
-          : decodeInfo(input),
-      )
+      const isV1 = ConfigMigrateV1.isV1(input)
+      if (isV1) {
+        const raw = input as Record<string, unknown>
+        const decoded = decodeV1Info(input)
+        const migrated = Option.map(decoded, ConfigMigrateV1.migrate)
+        const info = Option.getOrUndefined(Option.flatMap(migrated, decodeInfo))
+        if (raw["agent_graph"] !== undefined && info === undefined)
+          yield* Effect.logWarning(
+            "config: agent_graph is present but this file is detected as V1; migrate() drops unknown V1 keys, so agent_graph was ignored",
+            { path: filepath },
+          )
+        if (!info) return
+        return new Document({ type: "document", path: filepath, info })
+      }
+      const info = Option.getOrUndefined(decodeInfo(input))
       if (!info) return
       return new Document({ type: "document", path: filepath, info })
     })

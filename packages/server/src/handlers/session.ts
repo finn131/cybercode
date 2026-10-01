@@ -1,4 +1,7 @@
 import { SessionV2 } from "@opencode-ai/core/session"
+import { AgentBootstrap } from "@opencode-ai/core/agent-graph/bootstrap"
+import { AgentGraph } from "@opencode-ai/core/agent-graph/graph"
+import { Config } from "@opencode-ai/core/config"
 import { DateTime, Effect, Stream } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
 import { Api } from "../api"
@@ -6,6 +9,7 @@ import { SessionsCursor } from "@opencode-ai/protocol/groups/session"
 import {
   ConflictError,
   InvalidCursorError,
+  InvalidRequestError,
   MessageNotFoundError,
   ServiceUnavailableError,
   SessionNotFoundError,
@@ -67,14 +71,24 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.create",
         Effect.fn(function* (ctx) {
-          return {
-            data: yield* session.create({
+          const sessionInfo = yield* session
+            .create({
               id: ctx.payload.id,
               agent: ctx.payload.agent,
               model: ctx.payload.model,
               location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
-            }),
-          }
+              parentID: ctx.payload.parentID,
+            })
+            .pipe(
+              Effect.catchTag("Session.ParentNotFoundError", (error) =>
+                Effect.fail(
+                  new InvalidRequestError({
+                    message: `Parent session not found: ${error.sessionID}`,
+                  }),
+                ),
+              ),
+            )
+          return { data: sessionInfo }
         }),
       )
       .handle(
@@ -139,6 +153,19 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.prompt",
         Effect.fn(function* (ctx) {
+          const graph = yield* AgentGraph.Service
+          const config = yield* Config.Service
+          const sessionInfo = yield* session
+            .get(ctx.params.sessionID)
+            .pipe(Effect.orDie)
+          yield* AgentBootstrap.registerForPrompt(
+            { graph, config },
+            {
+              sessionID: ctx.params.sessionID,
+              parentID: sessionInfo.parentID,
+              agent: sessionInfo.agent ?? "build",
+            },
+          )
           return {
             data: yield* session
               .prompt({
