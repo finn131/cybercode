@@ -12,6 +12,7 @@ import { Policy } from "./policy"
 import { AbsolutePath } from "./schema"
 import { ConfigAgent } from "./config/agent"
 import { ConfigAgentGraph } from "./config/agent-graph"
+import { ConfigSandbox } from "./config/sandbox"
 import { ConfigAttachments } from "./config/attachments"
 import { ConfigCompaction } from "./config/compaction"
 import { ConfigCommand } from "./config/command"
@@ -87,6 +88,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   agent_graph: ConfigAgentGraph.Info.pipe(Schema.optional).annotate({
     description: "Multi-agent graph behavior. Enables lifecycle tools for scoped runs",
+  }),
+  sandbox: ConfigSandbox.Info.pipe(Schema.optional).annotate({
+    description: "Container sandbox for the bash tool. Off by default",
   }),
   compaction: ConfigCompaction.Info.pipe(Schema.optional).annotate({
     description: "Conversation compaction behavior",

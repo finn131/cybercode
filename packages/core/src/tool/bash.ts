@@ -7,8 +7,10 @@ import { ChildProcess } from "effect/unstable/process"
 import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
 import { FSUtil } from "../fs-util"
+import { Location } from "../location"
 import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
+import { Sandbox } from "../sandbox/sandbox"
 import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
 import { ToolRegistry } from "./registry"
@@ -100,6 +102,8 @@ const layer = Layer.effectDiscard(
     const mutation = yield* LocationMutation.Service
     const fs = yield* FSUtil.Service
     const appProcess = yield* AppProcess.Service
+    const sandbox = yield* Sandbox.Service
+    const location = yield* Location.Service
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
 
@@ -152,9 +156,9 @@ const layer = Layer.effectDiscard(
                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
 
               const entries = yield* config.entries()
-              const shell =
-                Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
-                  .shell ?? defaultShell()
+              const info = Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
+              const shell = info.shell ?? defaultShell()
+              const sandboxEnabled = info.sandbox?.enabled === true
               const command = ChildProcess.make(input.command, [], {
                 cwd: target.canonical,
                 shell,
@@ -163,17 +167,27 @@ const layer = Layer.effectDiscard(
                 forceKillAfter: Duration.seconds(3),
               })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
-              const result = yield* appProcess
-                .run(command, {
-                  combineOutput: true,
-                  timeout: Duration.millis(timeout),
-                  maxOutputBytes: MAX_CAPTURE_BYTES,
-                })
-                .pipe(
-                  Effect.catchTag("AppProcessError", (error) =>
-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
-                  ),
-                )
+              // The sandbox is an opt-in transport for the same tool: git and
+              // ripgrep keep their host authority no matter what this gate says.
+              const result = yield* (sandboxEnabled
+                ? sandbox.run({
+                    cwd: target.canonical,
+                    script: input.command,
+                    timeout: Duration.millis(timeout),
+                    maxOutputBytes: MAX_CAPTURE_BYTES,
+                    image: info.sandbox?.image ?? "cybercode/sandbox:base",
+                    location: location.directory,
+                  })
+                : appProcess.run(command, {
+                    combineOutput: true,
+                    timeout: Duration.millis(timeout),
+                    maxOutputBytes: MAX_CAPTURE_BYTES,
+                  })
+              ).pipe(
+                Effect.catchTag("AppProcessError", (error) =>
+                  isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+                ),
+              )
               if (!result) {
                 return {
                   output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
@@ -203,5 +217,14 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
+  deps: [
+    ToolRegistry.node,
+    Location.node,
+    LocationMutation.node,
+    FSUtil.node,
+    AppProcess.node,
+    Sandbox.node,
+    Config.node,
+    PermissionV2.node,
+  ],
 })

@@ -12,6 +12,7 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationMutation } from "@opencode-ai/core/location-mutation"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AppProcess } from "@opencode-ai/core/process"
+import { Sandbox } from "@opencode-ai/core/sandbox/sandbox"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { BashTool } from "@opencode-ai/core/tool/bash"
@@ -44,6 +45,16 @@ let result: AppProcess.RunResult = {
 let runFailure: AppProcess.AppProcessError | undefined
 let afterPermission = (_input: PermissionV2.AssertInput): Effect.Effect<void> => Effect.void
 
+const sandboxRuns: Array<{ cwd: string; script: string; location: string; image: string }> = []
+const sandboxLayer = Layer.succeed(
+  Sandbox.Service,
+  Sandbox.Service.of({
+    run: (input: Sandbox.RunInput) =>
+      Effect.sync(() => sandboxRuns.push(input)).pipe(Effect.andThen(Effect.succeed(result))),
+    stop: Effect.void,
+  } as unknown as Sandbox.Interface),
+)
+
 const permission = Layer.succeed(
   PermissionV2.Service,
   PermissionV2.Service.of({
@@ -72,16 +83,19 @@ const appProcess = Layer.succeed(
       }),
   } as unknown as AppProcess.Interface),
 )
+let configEntries: Array<{ type: "document"; info: Record<string, unknown> }> = []
 const config = Layer.succeed(
   Config.Service,
   Config.Service.of({
-    entries: () => Effect.succeed([]),
+    entries: () => Effect.sync(() => configEntries),
   }),
 )
 
 const reset = () => {
   assertions.length = 0
   runs.length = 0
+  sandboxRuns.length = 0
+  configEntries = []
   denyAction = undefined
   runFailure = undefined
   afterPermission = () => Effect.void
@@ -116,6 +130,7 @@ const withTool = <A, E, R>(
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
           [AppProcess.node, processLayer],
+          [Sandbox.node, sandboxLayer],
           [Config.node, config],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
@@ -434,4 +449,48 @@ test("keeps locked deferred parity TODOs visible", async () => {
   ]) {
     expect(source).toContain(`TODO: ${todo}`)
   }
+})
+
+describe("BashTool sandbox gate", () => {
+  it.live("routes to the sandbox when sandbox.enabled is on", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        configEntries = [{ type: "document", info: { sandbox: { enabled: true } } }]
+        return withTool(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            expect(yield* settleTool(registry, call({ command: "id" }))).toMatchObject({
+              result: { type: "content" },
+            })
+            expect(sandboxRuns).toHaveLength(1)
+            expect(sandboxRuns[0]?.script).toBe("id")
+            expect(sandboxRuns[0]?.location).toBe(tmp.path)
+            expect(runs).toHaveLength(0)
+          }),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("keeps the host path when the gate is off", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withTool(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            expect(yield* settleTool(registry, call({ command: "id" }))).toMatchObject({
+              result: { type: "content" },
+            })
+            expect(runs).toHaveLength(1)
+            expect(runs[0]?.command).toBe("id")
+            expect(sandboxRuns).toHaveLength(0)
+          }),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
 })

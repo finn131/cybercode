@@ -22,6 +22,7 @@ export const ExecCommand = effectCmd({
     const { ServerAuth } = yield* Effect.promise(() => import("@/server/auth"))
     const { createOpencodeClient } = yield* Effect.promise(() => import("@opencode-ai/sdk/v2"))
     const { executeV2 } = yield* Effect.promise(() => import("./run-v2/execute"))
+    const { SandboxDocker } = yield* Effect.promise(() => import("@opencode-ai/core/sandbox/docker"))
 
     const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init)
@@ -33,28 +34,37 @@ export const ExecCommand = effectCmd({
 
     const sdk = createOpencodeClient({ baseUrl: "http://opencode.internal", fetch, directory: process.cwd() })
 
-    const result = yield* Effect.promise(() =>
-      executeV2(
-        {
-          create: sdk.v2.session.create.bind(sdk.v2.session),
-          prompt: sdk.v2.session.prompt.bind(sdk.v2.session),
-          events: sdk.v2.session.events.bind(sdk.v2.session),
-          active: sdk.v2.session.active.bind(sdk.v2.session),
-        },
-        {
-          message,
-          directory: process.cwd(),
-          agent: args.agent,
-          model: args.model,
-          pollIntervalMs: args.interval,
-          minActivePolls: args["min-polls"],
-          onEvent: (event) => {
-            if (event.kind === "text") return process.stdout.write(event.text + "\n")
-            if (event.kind === "cost") return process.stdout.write(`  cost: $${event.cost.toFixed(4)}\n`)
-            return process.stdout.write(`  ${event.outcome}: ${event.name}\n`)
+    const containerName = SandboxDocker.containerName()
+
+    const result = yield* Effect.ensuring(
+      Effect.promise(() =>
+        executeV2(
+          {
+            create: sdk.v2.session.create.bind(sdk.v2.session),
+            prompt: sdk.v2.session.prompt.bind(sdk.v2.session),
+            events: sdk.v2.session.events.bind(sdk.v2.session),
+            active: sdk.v2.session.active.bind(sdk.v2.session),
           },
-        },
+          {
+            message,
+            directory: process.cwd(),
+            agent: args.agent,
+            model: args.model,
+            pollIntervalMs: args.interval,
+            minActivePolls: args["min-polls"],
+            onEvent: (event) => {
+              if (event.kind === "text") return process.stdout.write(event.text + "\n")
+              if (event.kind === "cost") return process.stdout.write(`  cost: $${event.cost.toFixed(4)}\n`)
+              return process.stdout.write(`  ${event.outcome}: ${event.name}\n`)
+            },
+          },
+        ),
       ),
+      Effect.sync(() => {
+        try {
+          void Bun.spawn(["docker", "rm", "-f", containerName]).exited.catch(() => {})
+        } catch {}
+      }),
     )
 
     if (result.error) return yield* fail(result.error, 1)
