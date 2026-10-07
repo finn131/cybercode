@@ -1,0 +1,4 @@
+{
+  "//": "Scopes the extensionless CJS launcher in this directory. Without it the nearest package.json (\"type\": \"module\") makes node load bin/cybercode as ESM and `require` is undefined.",
+  "type": "commonjs"
+}
