@@ -90,6 +90,8 @@ function unwrap(input: unknown): DurableEvent | undefined {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+type ActiveResult = { readonly data?: Record<string, unknown>; readonly error?: { message: string } }
+
 /** Signals the wall-clock budget ran out. Always fatal. */
 class WallClockExceeded extends Error {
   constructor(readonly budgetMs: number) {
@@ -153,6 +155,12 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
   // just the callID, so the name has to be remembered here.
   const names = new Map<string, string>()
   let sawLifecycleFinish = false
+  /**
+   * Any event proving the session actually ran. `active() == empty` alone cannot
+   * distinguish "finished" from "the drain died before publishing anything", and
+   * treating the latter as success is a false positive on a headless CLI.
+   */
+  let observedActivity = false
   let sawActive = false
   let absentStreak = 0
   let streamDone = false
@@ -182,16 +190,19 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
         const data = (event.data ?? {}) as Record<string, unknown>
         switch (event.type) {
           case "session.next.text.ended": {
+            observedActivity = true
             const text = typeof data.text === "string" ? data.text : ""
             if (text) options.onEvent({ kind: "text", text })
             break
           }
           case "session.next.step.ended": {
+            observedActivity = true
             const cost = typeof data.cost === "number" ? data.cost : 0
             options.onEvent({ kind: "cost", cost })
             break
           }
           case "session.next.tool.called": {
+            observedActivity = true
             const name = typeof data.tool === "string" ? data.tool : "tool"
             const callID = typeof data.callID === "string" ? data.callID : undefined
             if (callID) names.set(callID, name)
@@ -200,6 +211,7 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
           }
           case "session.next.tool.success":
           case "session.next.tool.failed": {
+            observedActivity = true
             const callID = typeof data.callID === "string" ? data.callID : undefined
             const name = (callID ? names.get(callID) : undefined) ?? "tool"
             const outcome = event.type === "session.next.tool.success" ? "success" : "failed"
@@ -216,8 +228,20 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
     }
   })()
 
-  // Exit code 0 clean, 2 a lifecycle tool finished the run.
-  const verdict = () => ({ ok: true as const, exitCode: sawLifecycleFinish ? 2 : 0, sawLifecycleFinish })
+  // Exit code 0 clean, 2 a lifecycle tool finished the run. Idle with no observed
+  // activity is fatal: the drain died before publishing anything, and reporting
+  // that as a clean finish would be a false positive on a headless CLI.
+  const verdict = (): ExecuteResult => {
+    if (sawLifecycleFinish) return { ok: true, exitCode: 2, sawLifecycleFinish }
+    if (!observedActivity)
+      return {
+        ok: false,
+        exitCode: 1,
+        sawLifecycleFinish,
+        error: "session went idle without producing any activity",
+      }
+    return { ok: true, exitCode: 0, sawLifecycleFinish }
+  }
 
   let verdictResult: ExecuteResult | undefined
   while (!verdictResult && !streamDone) {
@@ -230,7 +254,7 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
       verdictResult = fatal(new WallClockExceeded(maxDuration))
       break
     }
-    const active = await api.active().catch((error: unknown) => ({
+    const active: ActiveResult = await api.active().catch((error: unknown): ActiveResult => ({
       error: { message: isWallClock(error) ? error.message : String(error) },
     }))
     if (active.error) {
@@ -256,7 +280,7 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
 
   // No idle verdict and the loop only exits because the stream ended: the last
   // active check decides whether that is acceptable.
-  const final = await api.active().catch((error: unknown) => ({
+  const final: ActiveResult = await api.active().catch((error: unknown): ActiveResult => ({
     error: { message: isWallClock(error) ? error.message : String(error) },
   }))
   if (final.error) return { ok: false, exitCode: 1, sawLifecycleFinish, error: final.error.message }

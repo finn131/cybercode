@@ -123,14 +123,14 @@ describe("executeV2 exit codes", () => {
 describe("executeV2 idle detection", () => {
   test("exits after the session disappears from active", async () => {
     // First poll sees the session running, later polls do not.
-    const result = await executeV2(fakeApi([], [{ ses_abc: {} }, undefined, undefined]), base())
+    const result = await executeV2(fakeApi([text("hi")], [{ ses_abc: {} }, undefined, undefined]), base())
 
     expect(result.exitCode).toBe(0)
     expect(result.ok).toBe(true)
   })
 
   test("waits for minActivePolls before trusting an absent session", async () => {
-    const result = await executeV2(fakeApi([], [undefined, undefined, undefined]), base({ minActivePolls: 3 }))
+    const result = await executeV2(fakeApi([text("hi")], [undefined, undefined, undefined]), base({ minActivePolls: 3 }))
 
     expect(result.exitCode).toBe(0)
     expect(result.ok).toBe(true)
@@ -261,7 +261,9 @@ describe("executeV2 wall-clock guard", () => {
     )
 
     expect(closed).toBe(true)
-    expect(result.exitCode).toBe(0)
+    // No events were ever published, so this is a dead run, not a clean finish.
+    expect(result.exitCode).toBe(1)
+    expect(result.error).toContain("without producing any activity")
   })
 
   test("surfaces an active() failure as fatal rather than hanging", async () => {
@@ -273,5 +275,97 @@ describe("executeV2 wall-clock guard", () => {
     expect(result.ok).toBe(false)
     expect(result.exitCode).toBe(1)
     expect(result.error).toBe("active exploded")
+  })
+})
+
+
+// active() empty for every poll, with a controlled event script.
+const idleWith = (script: ReadonlyArray<unknown>, polls: number = 6): V2Api => {
+  let poll = 0
+  return {
+    create: async () => ({ data: { data: { id: "ses_abc" } } }),
+    prompt: async () => ({ data: { id: "msg_1" } }),
+    events: async () => ({
+      stream: (async function* () {
+        for (const item of script) {
+          await sleepMs(1)
+          yield item
+        }
+      })(),
+    }),
+    active: async () => {
+      poll += 1
+      return poll <= polls ? { data: {} } : { data: { ses_abc: { type: "running" } } }
+    },
+  }
+}
+
+const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const EV = {
+  text: text("done"),
+  step: step(0.1),
+  toolCalled: toolCalled("call_1", "bash"),
+  toolSuccess: toolResult("call_1", "success"),
+  noise: unknown(),
+}
+
+describe("executeV2 no-activity guard", () => {
+  test("1. no events and active() empty immediately -> exit 1", async () => {
+    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2 }))
+
+    expect(result.ok).toBe(false)
+    expect(result.exitCode).toBe(1)
+    expect(result.error).toContain("without producing any activity")
+    expect(result.sawLifecycleFinish).toBe(false)
+  })
+
+  test("2. no events and active() empty through minActivePolls -> exit 1", async () => {
+    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2, minActivePolls: 3 }))
+
+    expect(result.exitCode).toBe(1)
+    expect(result.timedOut).toBeUndefined()
+    expect(result.error).toContain("without producing any activity")
+  })
+
+  test("3. tool.called then active then idle -> exit 0", async () => {
+    const result = await executeV2(idleWith([EV.toolCalled, EV.toolSuccess], 2), base({ pollIntervalMs: 2 }))
+
+    expect(result.ok).toBe(true)
+    expect(result.exitCode).toBe(0)
+  })
+
+  test("4. text.ended then active then idle -> exit 0", async () => {
+    const result = await executeV2(idleWith([EV.text], 2), base({ pollIntervalMs: 2 }))
+
+    expect(result.exitCode).toBe(0)
+  })
+
+  test("5. step.ended then active then idle -> exit 0", async () => {
+    const result = await executeV2(idleWith([EV.step], 2), base({ pollIntervalMs: 2 }))
+
+    expect(result.exitCode).toBe(0)
+  })
+
+  test("6. lifecycle finish still wins over the activity guard -> exit 2", async () => {
+    const script = [toolCalled("call_1", "scan_finish"), toolResult("call_1", "success")]
+    const result = await executeV2(idleWith(script, 2), base({ pollIntervalMs: 2 }))
+
+    expect(result.exitCode).toBe(2)
+    expect(result.sawLifecycleFinish).toBe(true)
+  })
+
+  test("7. timeout with no events -> exit 1 and timedOut", async () => {
+    const api = hangingApi(async () => ({ data: {} }))
+    const result = await executeV2(api, base({ maxDurationMs: 60, pollIntervalMs: 5, minActivePolls: 999 }))
+
+    expect(result.exitCode).toBe(1)
+    expect(result.timedOut).toBe(true)
+  })
+
+  test("ignores lifecycle noise that does not prove the run executed", async () => {
+    const result = await executeV2(idleWith([EV.noise], 99), base({ pollIntervalMs: 2 }))
+
+    expect(result.exitCode).toBe(1)
   })
 })
