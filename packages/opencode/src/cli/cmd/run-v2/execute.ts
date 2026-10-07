@@ -40,6 +40,13 @@ export interface ExecuteOptions {
   readonly pollIntervalMs?: number
   /** Fail the run if the stream does not show an active session within this many polls. */
   readonly minActivePolls?: number
+  /**
+   * Hard budget for the whole lifecycle: create, prompt, stream consumption and
+   * idle polling. Exceeding it is fatal, never a clean finish.
+   */
+  readonly maxDurationMs?: number
+  /** How long to wait for the event stream to settle once a verdict is reached. */
+  readonly streamGraceMs?: number
   readonly onEvent: (event: RenderEvent) => void
 }
 
@@ -49,7 +56,11 @@ export interface ExecuteResult {
   readonly exitCode: number
   readonly sawLifecycleFinish: boolean
   readonly error?: string
+  /** True when the run was cut short by the wall-clock budget, not by an error. */
+  readonly timedOut?: boolean
 }
+
+export const DEFAULT_MAX_DURATION_MS = 30 * 60 * 1000
 
 const LIFECYCLE_TOOLS = new Set(["scan_finish", "agent_finish"])
 
@@ -79,20 +90,63 @@ function unwrap(input: unknown): DurableEvent | undefined {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** Signals the wall-clock budget ran out. Always fatal. */
+class WallClockExceeded extends Error {
+  constructor(readonly budgetMs: number) {
+    super(`run exceeded wall-clock budget of ${Math.round(budgetMs / 1000)}s`)
+    this.name = "WallClockExceeded"
+  }
+}
+
+const isWallClock = (error: unknown) => error instanceof WallClockExceeded
+
 export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<ExecuteResult> {
   const poll = options.pollIntervalMs ?? 500
   const minActivePolls = options.minActivePolls ?? 2
+  const maxDuration = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
+  const grace = options.streamGraceMs ?? 2_000
+  const deadlineAt = Date.now() + maxDuration
+  const remaining = () => deadlineAt - Date.now()
+
+  /** Bound any blocking await by whatever is left of the budget. */
+  const guard = <T>(work: Promise<T>): Promise<T> => {
+    const left = remaining()
+    if (left <= 0) return Promise.reject(new WallClockExceeded(maxDuration))
+    return Promise.race([work, sleep(left).then(() => Promise.reject(new WallClockExceeded(maxDuration)))])
+  }
+
+  const fatal = (error: unknown) => ({
+    ok: false,
+    exitCode: 1,
+    sawLifecycleFinish: false,
+    error: isWallClock(error) ? error.message : error instanceof Error ? error.message : String(error),
+    ...(isWallClock(error) ? { timedOut: true } : {}),
+  })
+
   const model = splitModel(options.model)
 
-  const created = await api.create({
-    agent: options.agent,
-    model,
-    location: { directory: options.directory },
-  })
+  let created: Awaited<ReturnType<V2Api["create"]>>
+  try {
+    created = await guard(
+      api.create({
+        agent: options.agent,
+        model,
+        location: { directory: options.directory },
+      }),
+    )
+  } catch (error) {
+    return fatal(error)
+  }
   const sessionID = created.data?.data?.id
-  if (!sessionID) return { ok: false, exitCode: 1, sawLifecycleFinish: false, error: created.error?.message ?? "failed to create session" }
+  if (!sessionID)
+    return { ok: false, exitCode: 1, sawLifecycleFinish: false, error: created.error?.message ?? "failed to create session" }
 
-  const admitted = await api.prompt({ sessionID, prompt: { text: options.message } })
+  let admitted: Awaited<ReturnType<V2Api["prompt"]>>
+  try {
+    admitted = await guard(api.prompt({ sessionID, prompt: { text: options.message } }))
+  } catch (error) {
+    return fatal(error)
+  }
   if (admitted.error) return { ok: false, exitCode: 1, sawLifecycleFinish: false, error: admitted.error.message }
 
   // Tool.Called is the only event that names the tool; Tool.Success/Failed carry
@@ -101,13 +155,28 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
   let sawLifecycleFinish = false
   let sawActive = false
   let absentStreak = 0
-  let polls = 0
   let streamDone = false
+  // Held so the SSE socket can be closed on any exit path; a stream left open
+  // keeps the event loop alive and the CLI never returns.
+  let closeStream: (() => void) | undefined
 
-  const eventStream = (await api.events({ sessionID })).stream
+  let eventStream: AsyncIterable<{ data?: unknown }>
+  try {
+    eventStream = (await guard(api.events({ sessionID }))).stream
+  } catch (error) {
+    return fatal(error)
+  }
+  const iterator = eventStream[Symbol.asyncIterator]()
+  closeStream = () => {
+    void Promise.resolve(iterator.return?.(undefined)).catch(() => {})
+  }
+
   const consume = (async () => {
     try {
-      for await (const item of eventStream) {
+      for (;;) {
+        const next = await iterator.next()
+        if (next.done) break
+        const item = next.value
         const event = unwrap(item)
         if (!event?.type?.startsWith("session.next.")) continue
         const data = (event.data ?? {}) as Record<string, unknown>
@@ -152,9 +221,18 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
 
   let verdictResult: ExecuteResult | undefined
   while (!verdictResult && !streamDone) {
-    await sleep(poll)
-    polls += 1
-    const active = await api.active()
+    if (remaining() <= 0) {
+      verdictResult = fatal(new WallClockExceeded(maxDuration))
+      break
+    }
+    await sleep(Math.min(poll, remaining()))
+    if (remaining() <= 0) {
+      verdictResult = fatal(new WallClockExceeded(maxDuration))
+      break
+    }
+    const active = await api.active().catch((error: unknown) => ({
+      error: { message: isWallClock(error) ? error.message : String(error) },
+    }))
     if (active.error) {
       verdictResult = { ok: false, exitCode: 1, sawLifecycleFinish, error: active.error.message }
       break
@@ -169,17 +247,18 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
     if (sawActive || absentStreak >= minActivePolls) verdictResult = verdict()
   }
 
-  // A finite stream ends on its own, so wait for it to drain before deciding.
-  if (verdictResult) {
-    await consume.catch(() => {})
-    return verdictResult
-  }
+  // Close the SSE socket and give the consumer a bounded grace window so events
+  // already in flight still render. Never wait unbounded on it.
+  closeStream()
+  await Promise.race([consume.catch(() => {}), sleep(Math.min(grace, Math.max(remaining(), 0)))])
 
-  // No idle verdict: the stream ended while polling kept seeing the session
-  // alive, or it ended before the first poll landed.
-  await sleep(poll)
-  const final = await api.active()
-  await consume.catch(() => {})
+  if (verdictResult) return verdictResult
+
+  // No idle verdict and the loop only exits because the stream ended: the last
+  // active check decides whether that is acceptable.
+  const final = await api.active().catch((error: unknown) => ({
+    error: { message: isWallClock(error) ? error.message : String(error) },
+  }))
   if (final.error) return { ok: false, exitCode: 1, sawLifecycleFinish, error: final.error.message }
   if (final.data && sessionID in final.data)
     return { ok: false, exitCode: 1, sawLifecycleFinish, error: "stream ended while session was still active" }

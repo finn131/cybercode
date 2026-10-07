@@ -13,7 +13,11 @@ export const ExecCommand = effectCmd({
       .option("agent", { type: "string", describe: "agent to use" })
       .option("model", { type: "string", describe: "model override (provider/model)" })
       .option("interval", { type: "number", default: 500, describe: "idle poll interval in ms" })
-      .option("min-polls", { type: "number", default: 2, describe: "polls before allowing an idle exit" }),
+      .option("min-polls", { type: "number", default: 2, describe: "polls before allowing an idle exit" })
+      .option("max-duration", {
+        type: "number",
+        describe: "wall-clock budget in seconds for the whole run (exceeding it exits 1)",
+      }),
   handler: Effect.fn("Cli.exec")(function* (args) {
     const message = [...args.message, ...(args["--"] || [])].join(" ")
     if (!message.trim()) return yield* fail("You must provide a message", 1)
@@ -67,7 +71,7 @@ export const ExecCommand = effectCmd({
       }),
     )
 
-    if (result.error) return yield* fail(result.error, 1)
+    if (result.error) return yield* fail(result.timedOut ? `timeout: ${result.error}` : result.error, 1)
     process.exitCode = result.exitCode
   }),
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { executeV2, type RenderEvent, type V2Api } from "../../src/cli/cmd/run-v2/execute"
+import { DEFAULT_MAX_DURATION_MS, executeV2, type RenderEvent, type V2Api } from "../../src/cli/cmd/run-v2/execute"
 
 const text = (value: string) => ({ data: { id: "evt_1", type: "session.next.text.ended", data: { text: value } } })
 const step = (cost: number) => ({ data: { id: "evt_2", type: "session.next.step.ended", data: { cost } } })
@@ -169,5 +169,109 @@ describe("executeV2 event rendering", () => {
 
     expect(events).toContainEqual({ kind: "text", text: "nested" })
     expect(events.filter((e) => e.kind === "text")).toHaveLength(1)
+  })
+})
+
+// A stream that never yields until it is closed: the shape that used to hang the CLI.
+// Closing resolves the pending next() so the consumer loop actually exits.
+const hangingApi = (
+  active: () => Promise<{ data?: Record<string, unknown>; error?: { message: string } }>,
+  onClose?: () => void,
+): V2Api => ({
+  create: async () => ({ data: { data: { id: "ses_abc" } } }),
+  prompt: async () => ({ data: { id: "msg_1" } }),
+  events: async () => {
+    let closed = false
+    let pending: ((result: IteratorResult<{ data?: unknown }>) => void) | undefined
+    return {
+      stream: {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              if (closed) return Promise.resolve({ done: true as const, value: undefined })
+              return new Promise<IteratorResult<{ data?: unknown }>>((resolve) => {
+                pending = resolve
+              })
+            },
+            return: async () => {
+              closed = true
+              onClose?.()
+              pending?.({ done: true, value: undefined })
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      } as AsyncIterable<{ data?: unknown }>,
+    }
+  },
+  active: async () => active(),
+})
+
+describe("executeV2 wall-clock guard", () => {
+  test("defaults to a bounded budget", () => {
+    expect(DEFAULT_MAX_DURATION_MS).toBe(30 * 60 * 1000)
+  })
+
+  test("exits 1 when the session stays active past the deadline", async () => {
+    const result = await executeV2(
+      hangingApi(async () => ({ data: { ses_abc: { type: "running" } } })),
+      base({ maxDurationMs: 60, pollIntervalMs: 5 }),
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.exitCode).toBe(1)
+    expect(result.timedOut).toBe(true)
+    expect(result.error).toContain("wall-clock")
+  })
+
+  test("exits 1 when create never resolves", async () => {
+    const api: V2Api = { ...hangingApi(async () => ({ data: {} })), create: () => new Promise(() => {}) }
+    const result = await executeV2(api, base({ maxDurationMs: 60 }))
+
+    expect(result.exitCode).toBe(1)
+    expect(result.timedOut).toBe(true)
+  })
+
+  test("exits 1 when prompt never resolves", async () => {
+    const api: V2Api = { ...hangingApi(async () => ({ data: {} })), prompt: () => new Promise(() => {}) }
+    const result = await executeV2(api, base({ maxDurationMs: 60 }))
+
+    expect(result.exitCode).toBe(1)
+    expect(result.timedOut).toBe(true)
+  })
+
+  test("never treats a timeout as a clean or lifecycle finish", async () => {
+    const result = await executeV2(
+      hangingApi(async () => ({ data: { ses_abc: { type: "running" } } })),
+      base({ maxDurationMs: 60, pollIntervalMs: 5 }),
+    )
+
+    expect(result.exitCode).not.toBe(0)
+    expect(result.exitCode).not.toBe(2)
+    expect(result.sawLifecycleFinish).toBe(false)
+  })
+
+  test("closes a stream that never ends once the session goes idle", async () => {
+    let closed = false
+    const result = await executeV2(
+      hangingApi(async () => ({ data: {} }), () => {
+        closed = true
+      }),
+      base({ pollIntervalMs: 5, minActivePolls: 2, streamGraceMs: 20 }),
+    )
+
+    expect(closed).toBe(true)
+    expect(result.exitCode).toBe(0)
+  })
+
+  test("surfaces an active() failure as fatal rather than hanging", async () => {
+    const result = await executeV2(
+      hangingApi(async () => ({ error: { message: "active exploded" } })),
+      base({ pollIntervalMs: 5, streamGraceMs: 20 }),
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.exitCode).toBe(1)
+    expect(result.error).toBe("active exploded")
   })
 })
