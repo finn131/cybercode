@@ -171,6 +171,12 @@ function migrateProvider(info: ConfigProviderV1.Info) {
   const lowerer = ConfigProviderOptionsV1.get(info.npm)
   const options = lowerer.provider(info.options ?? {})
   const url = info.api ?? options.url
+  // A V1 provider carries its key in `settings.apiKey`. V2 decides whether a
+  // provider is usable by looking at `request.body.apiKey`, so a migrated
+  // provider would otherwise look credential-less and never be selected.
+  const settingsApiKey = (options as { settings?: Record<string, unknown> }).settings?.["apiKey"]
+  const requestBody: Record<string, unknown> = { ...(options.body ?? {}) }
+  if (typeof settingsApiKey === "string") requestBody["apiKey"] = settingsApiKey
   return {
     name: info.name,
     env: info.env,
@@ -182,7 +188,7 @@ function migrateProvider(info: ConfigProviderV1.Info) {
           settings: options.settings ?? {},
         }
       : undefined,
-    request: info.options && { headers: options.headers, body: options.body },
+    request: info.options && { headers: options.headers, body: requestBody },
     models:
       info.models &&
       Object.fromEntries(Object.entries(info.models).map(([name, model]) => [name, migrateModel(model, info.npm)])),

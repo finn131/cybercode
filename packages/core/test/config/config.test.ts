@@ -76,6 +76,41 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("carries a v1 provider api key into the v2 request body", () =>
+    // V2 marks a provider usable only when request.body.apiKey is a string. A V1
+    // provider keeps its key in settings, so without this the migrated provider
+    // looks credential-less and its models never resolve.
+    Effect.sync(() => {
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          "9router": {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "http://127.0.0.1:20128/v1", apiKey: "sk-test" },
+            models: { "oc/big-pickle": { name: "oc/big-pickle" } },
+          },
+        },
+      } as never)
+
+      const provider = migrated.providers?.["9router"] as { request?: { body?: Record<string, unknown> } }
+      expect(provider.request?.body?.["apiKey"]).toBe("sk-test")
+    }),
+  )
+
+  it.effect("keeps a v2 provider body api key untouched during migration", () =>
+    Effect.sync(() => {
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          plain: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "http://127.0.0.1:20128/v1", apiKey: "sk-keep" },
+          },
+        },
+      } as never)
+      const provider = migrated.providers?.["plain"] as { request?: { body?: Record<string, unknown> } }
+      expect(provider.request?.body?.["apiKey"]).toBe("sk-keep")
+    }),
+  )
+
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
     Effect.sync(() => {
       FastCheck.assert(

@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { Effect, Schema } from "effect"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { Config } from "@opencode-ai/core/config"
+import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
 import { ConfigProviderPlugin } from "@opencode-ai/core/config/plugin/provider"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -55,6 +56,37 @@ function request(headers: Record<string, string>, variant?: string) {
 const decode = Schema.decodeUnknownSync(Config.Info)
 
 describe("ConfigProviderPlugin.Plugin", () => {
+  it.effect("marks a v1-migrated openai-compatible provider available", () =>
+    // Regression: a V1 provider keeps its key in settings. V1-to-V2 migration has
+    // to surface it as request.body.apiKey or the provider is never selected and
+    // its models resolve as unavailable.
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          "9router": {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "http://127.0.0.1:20128/v1", apiKey: "sk-test" },
+            models: { "oc/big-pickle": { name: "oc/big-pickle" } },
+          },
+        },
+      } as never)
+      const config = Config.Service.of({
+        entries: () =>
+          Effect.succeed([new Config.Document({ type: "document", info: decode(migrated) }) as never]),
+      })
+      yield* addPlugin(config)
+
+      const provider = yield* catalog.provider.get(ProviderV2.ID.make("9router"))
+      expect(provider).toBeDefined()
+      expect(provider?.request.body["apiKey"]).toBe("sk-test")
+      expect((yield* catalog.provider.available()).map((p) => p.id)).toContain("9router")
+      expect((yield* catalog.model.available()).map((m) => `${m.providerID}/${m.id}`)).toContain(
+        "9router/oc/big-pickle",
+      )
+    }),
+  )
+
   it.effect("keeps configured model variant bodies unchanged", () =>
     Effect.gen(function* () {
       const catalog = yield* Catalog.Service
