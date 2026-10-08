@@ -1,7 +1,7 @@
 export * as Catalog from "./catalog"
 
 import { makeLocationNode } from "./effect/app-node"
-import { Array, Context, Effect, Layer, Option, Order, pipe, Schema } from "effect"
+import { Array, Context, Deferred, Effect, Layer, Option, Order, pipe, Schema } from "effect"
 import { Catalog } from "@opencode-ai/schema/catalog"
 import { ModelV2 } from "./model"
 import { ProviderV2 } from "./provider"
@@ -45,6 +45,15 @@ export type Draft = {
 }
 
 export interface Interface extends State.Transformable<Draft> {
+  /**
+   * Resolves once the plugin boot batch has finished materialising its transforms.
+   * Plugin registration defers its reload to the end of that batch, so a caller that
+   * resolves a model before it settles sees a catalog that is still missing every
+   * provider the configuration declares.
+   */
+  readonly ready: Effect.Effect<void>
+  /** Called by the plugin boot once its batch completes. Idempotent. */
+  readonly markReady: Effect.Effect<void>
   readonly provider: {
     readonly get: (providerID: ProviderV2.ID) => Effect.Effect<ProviderV2.Info | undefined>
     readonly all: () => Effect.Effect<ProviderV2.Info[]>
@@ -67,6 +76,9 @@ const layer = Layer.effect(
     const events = yield* EventV2.Service
     const policy = yield* Policy.Service
     const integrations = yield* Integration.Service
+    // Resolved once the plugin boot batch has committed its transforms.
+    const ready = yield* Deferred.make<void>()
+    let readyOpen = false
 
     const available = (provider: ProviderV2.Info, integration: Integration.Info | undefined) => {
       if (provider.disabled) return false
@@ -171,6 +183,12 @@ const layer = Layer.effect(
     const result: Interface = {
       transform: state.transform,
       reload: state.reload,
+      ready: Deferred.await(ready),
+      markReady: Effect.suspend(() => {
+        if (readyOpen) return Effect.void
+        readyOpen = true
+        return Deferred.succeed(ready, undefined)
+      }),
 
       provider: {
         get: Effect.fn("CatalogV2.provider.get")(function* (providerID) {

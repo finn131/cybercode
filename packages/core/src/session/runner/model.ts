@@ -6,7 +6,7 @@ import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-message
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
 import { Catalog } from "../../catalog"
 import { Credential } from "../../credential"
@@ -187,6 +187,11 @@ export const locationLayer = Layer.effect(
     return Service.of({
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {
         // Location plugins populate and filter the catalog asynchronously during layer startup.
+        // Querying before that batch settles sees a catalog missing every configured
+        // provider, so the session resolves to "unavailable" instead of using its model.
+        // ponytail: bounded wait rather than an open latch, so a plugin that never
+        // settles degrades to a real unavailable error instead of hanging the drain.
+        yield* catalog.ready.pipe(Effect.timeoutOption(READY_TIMEOUT), Effect.asVoid)
         const defaultModel = session.model ? undefined : yield* catalog.model.default()
         const selected = session.model
           ? (yield* catalog.model.available()).find(
@@ -214,5 +219,7 @@ export const locationLayer = Layer.effect(
     })
   }),
 )
+
+const READY_TIMEOUT = Duration.seconds(30)
 
 export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node] })

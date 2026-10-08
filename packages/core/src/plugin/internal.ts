@@ -120,7 +120,13 @@ const layer = Layer.effectDiscard(
         yield* add(ConfigProviderPlugin.Plugin)
         yield* add(VariantPlugin.Plugin)
       }),
-    ).pipe(Effect.withSpan("PluginInternal.boot"), Effect.forkScoped({ startImmediately: true }))
+    ).pipe(
+      // A registered transform is only materialised when the batch ends, so the
+      // catalog cannot answer model queries correctly until then.
+      Effect.andThen(catalog.markReady),
+      Effect.withSpan("PluginInternal.boot"),
+      Effect.forkScoped({ startImmediately: true }),
+    )
   }),
 )
 
