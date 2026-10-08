@@ -80,7 +80,7 @@ describe("ConfigProviderPlugin.Plugin", () => {
       const provider = yield* catalog.provider.get(ProviderV2.ID.make("9router"))
       expect(provider).toBeDefined()
       expect(provider?.request.body["apiKey"]).toBe("sk-test")
-      expect((yield* catalog.provider.available()).map((p) => p.id)).toContain("9router")
+      expect((yield* catalog.provider.available()).map((p) => p.id)).toContain(ProviderV2.ID.make("9router"))
       expect((yield* catalog.model.available()).map((m) => `${m.providerID}/${m.id}`)).toContain(
         "9router/oc/big-pickle",
       )
