@@ -47,6 +47,12 @@ export interface ExecuteOptions {
   readonly maxDurationMs?: number
   /** How long to wait for the event stream to settle once a verdict is reached. */
   readonly streamGraceMs?: number
+  /**
+   * How long to wait for the drain to visibly start before calling the run dead.
+   * A session that produced nothing and never appears in `active` is a failed run,
+   * but absence alone proves nothing until the drain has had a chance to register.
+   */
+  readonly startTimeoutMs?: number
   readonly onEvent: (event: RenderEvent) => void
 }
 
@@ -61,6 +67,8 @@ export interface ExecuteResult {
 }
 
 export const DEFAULT_MAX_DURATION_MS = 30 * 60 * 1000
+/** Startup budget before a run that never registered is declared dead. */
+export const DEFAULT_START_TIMEOUT_MS = 30 * 1000
 
 const LIFECYCLE_TOOLS = new Set(["scan_finish", "agent_finish"])
 
@@ -107,7 +115,9 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
   const minActivePolls = options.minActivePolls ?? 2
   const maxDuration = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
   const grace = options.streamGraceMs ?? 2_000
-  const deadlineAt = Date.now() + maxDuration
+  const startTimeout = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS
+  const startedAt = Date.now()
+  const deadlineAt = startedAt + maxDuration
   const remaining = () => deadlineAt - Date.now()
 
   /** Bound any blocking await by whatever is left of the budget. */
@@ -268,7 +278,14 @@ export async function executeV2(api: V2Api, options: ExecuteOptions): Promise<Ex
       continue
     }
     absentStreak += 1
-    if (sawActive || absentStreak >= minActivePolls) verdictResult = verdict()
+    // Absent before the drain ever registered proves nothing: booting the location
+    // and its plugin batch outlast a couple of polls, so scoring that as finished
+    // reports a healthy run as a failure. Wait for a real start first.
+    if (sawActive || (observedActivity && absentStreak >= minActivePolls)) {
+      verdictResult = verdict()
+      continue
+    }
+    if (!observedActivity && Date.now() - startedAt >= startTimeout) verdictResult = verdict()
   }
 
   // Close the SSE socket and give the consumer a bounded grace window so events

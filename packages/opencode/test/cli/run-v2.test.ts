@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { DEFAULT_MAX_DURATION_MS, executeV2, type RenderEvent, type V2Api } from "../../src/cli/cmd/run-v2/execute"
+import {
+  DEFAULT_MAX_DURATION_MS,
+  DEFAULT_START_TIMEOUT_MS,
+  executeV2,
+  type RenderEvent,
+  type V2Api,
+} from "../../src/cli/cmd/run-v2/execute"
 
 const text = (value: string) => ({ data: { id: "evt_1", type: "session.next.text.ended", data: { text: value } } })
 const step = (cost: number) => ({ data: { id: "evt_2", type: "session.next.step.ended", data: { cost } } })
@@ -210,6 +216,37 @@ const hangingApi = (
 describe("executeV2 wall-clock guard", () => {
   test("defaults to a bounded budget", () => {
     expect(DEFAULT_MAX_DURATION_MS).toBe(30 * 60 * 1000)
+    expect(DEFAULT_START_TIMEOUT_MS).toBe(30 * 1000)
+  })
+
+  test("waits for a drain that has not registered yet instead of calling it idle", async () => {
+    // Absence of `active` right after prompt says nothing: booting the location and
+    // its plugin batch outlasts a couple of polls. This used to report a healthy run
+    // as "no activity".
+    let poll = 0
+    const api: V2Api = {
+      create: async () => ({ data: { data: { id: "ses_abc" } } }),
+      prompt: async () => ({ data: { id: "msg_1" } }),
+      events: async () => ({
+        stream: (async function* () {
+          await new Promise((r) => setTimeout(r, 120))
+          yield text("late answer")
+          await new Promise((r) => setTimeout(r, 600))
+        })(),
+      }),
+      active: async () => {
+        poll += 1
+        // Not draining yet, then draining, then finished.
+        if (poll < 8) return { data: {} }
+        if (poll < 25) return { data: { ses_abc: { type: "running" } } }
+        return { data: {} }
+      },
+    }
+
+    const result = await executeV2(api, base({ pollIntervalMs: 10, minActivePolls: 2, startTimeoutMs: 5_000 }))
+
+    expect(result.exitCode).toBe(0)
+    expect(result.ok).toBe(true)
   })
 
   test("exits 1 when the session stays active past the deadline", async () => {
@@ -257,7 +294,7 @@ describe("executeV2 wall-clock guard", () => {
       hangingApi(async () => ({ data: {} }), () => {
         closed = true
       }),
-      base({ pollIntervalMs: 5, minActivePolls: 2, streamGraceMs: 20 }),
+      base({ pollIntervalMs: 5, minActivePolls: 2, streamGraceMs: 20, startTimeoutMs: 40 }),
     )
 
     expect(closed).toBe(true)
@@ -269,7 +306,7 @@ describe("executeV2 wall-clock guard", () => {
   test("surfaces an active() failure as fatal rather than hanging", async () => {
     const result = await executeV2(
       hangingApi(async () => ({ error: { message: "active exploded" } })),
-      base({ pollIntervalMs: 5, streamGraceMs: 20 }),
+      base({ pollIntervalMs: 5, streamGraceMs: 20, startTimeoutMs: 40 }),
     )
 
     expect(result.ok).toBe(false)
@@ -312,7 +349,7 @@ const EV = {
 
 describe("executeV2 no-activity guard", () => {
   test("1. no events and active() empty immediately -> exit 1", async () => {
-    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2 }))
+    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2, startTimeoutMs: 40 }))
 
     expect(result.ok).toBe(false)
     expect(result.exitCode).toBe(1)
@@ -321,7 +358,7 @@ describe("executeV2 no-activity guard", () => {
   })
 
   test("2. no events and active() empty through minActivePolls -> exit 1", async () => {
-    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2, minActivePolls: 3 }))
+    const result = await executeV2(idleWith([], 99), base({ pollIntervalMs: 2, minActivePolls: 3, startTimeoutMs: 40 }))
 
     expect(result.exitCode).toBe(1)
     expect(result.timedOut).toBeUndefined()
@@ -364,7 +401,7 @@ describe("executeV2 no-activity guard", () => {
   })
 
   test("ignores lifecycle noise that does not prove the run executed", async () => {
-    const result = await executeV2(idleWith([EV.noise], 99), base({ pollIntervalMs: 2 }))
+    const result = await executeV2(idleWith([EV.noise], 99), base({ pollIntervalMs: 2, startTimeoutMs: 40 }))
 
     expect(result.exitCode).toBe(1)
   })
