@@ -165,12 +165,29 @@ const layer = Layer.effect(
         const raw = input as Record<string, unknown>
         const decoded = decodeV1Info(input)
         const migrated = Option.map(decoded, ConfigMigrateV1.migrate)
-        const info = Option.getOrUndefined(Option.flatMap(migrated, decodeInfo))
-        if (raw["agent_graph"] !== undefined && info === undefined)
-          yield* Effect.logWarning(
-            "config: agent_graph is present but this file is detected as V1; migrate() drops unknown V1 keys, so agent_graph was ignored",
-            { path: filepath },
-          )
+        // The V1 decode runs with onExcessProperty:"ignore", so V2-native sections
+        // that share this file are already gone by the time migrate runs. Read them
+        // back off the raw document, or a stray `provider` key silently disables
+        // them with no error anywhere.
+        const info = Option.getOrUndefined(
+          Option.flatMap(migrated, (migratedInfo) =>
+            decodeInfo({
+              ...migratedInfo,
+              ...(raw["sandbox"] !== undefined ? { sandbox: raw["sandbox"] } : {}),
+              ...(raw["agent_graph"] !== undefined ? { agent_graph: raw["agent_graph"] } : {}),
+            }),
+          ),
+        )
+        // migrate() carries agent_graph and sandbox through, so a V1-shaped file that
+        // also holds them keeps working. This only fires when the whole document fails
+        // V2 decode, which leaves genuinely unknown keys with nowhere to go.
+        if (info === undefined)
+          for (const key of ["agent_graph", "sandbox"])
+            if (raw[key] !== undefined)
+              yield* Effect.logWarning(
+                `config: this file is detected as V1 and failed V2 decode, so "${key}" and every unknown key were dropped`,
+                { path: filepath },
+              )
         if (!info) return
         return new Document({ type: "document", path: filepath, info })
       }

@@ -76,6 +76,35 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("keeps sandbox and agent_graph that share a v1-detected file", () =>
+    // Boundary: decodeV1Info runs with onExcessProperty:"ignore", so migrate() can
+    // never see these keys. config.ts reads them back off the raw document. Without
+    // that, a file carrying `provider` silently turns the sandbox off.
+    Effect.sync(() => {
+      const raw = {
+        provider: { "9router": { npm: "@ai-sdk/openai-compatible", options: { apiKey: "sk-test" } } },
+        small_model: "9router/oc/big-pickle",
+        sandbox: { enabled: true, image: "cybercode/sandbox:base" },
+        agent_graph: { enabled: true },
+      }
+      // isV1 trips on provider/small_model
+      expect(ConfigMigrateV1.isV1(raw)).toBe(true)
+      // V1 decode strips the V2-native keys
+      const decoded = Schema.decodeUnknownSync(ConfigV1.Info)(raw as never) as Record<string, unknown>
+      expect(decoded["sandbox"]).toBeUndefined()
+      // config.ts merges them back from raw before the V2 decode
+      const migrated = ConfigMigrateV1.migrate(decoded as never) as Record<string, unknown>
+      const merged = Schema.decodeUnknownSync(Config.Info)({
+        ...migrated,
+        sandbox: raw.sandbox,
+        agent_graph: raw.agent_graph,
+      }) as { sandbox?: unknown; agent_graph?: unknown; providers?: Record<string, unknown> }
+      expect(merged.sandbox).toEqual({ enabled: true, image: "cybercode/sandbox:base" })
+      expect(merged.agent_graph).toEqual({ enabled: true })
+      expect(Object.keys(merged.providers ?? {})).toContain("9router")
+    }),
+  )
+
   it.effect("carries a v1 provider api key into the v2 request body", () =>
     // V2 marks a provider usable only when request.body.apiKey is a string. A V1
     // provider keeps its key in settings, so without this the migrated provider
