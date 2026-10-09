@@ -35,25 +35,44 @@ These decide what is *callable*. `CatalogV2.provider.available()`
 | `reference.transform` | `host.ts:197-207` | Publish named references |
 | `plugin.add` | `host.ts:193-196` | Register another plugin |
 
-These decide what the agent can *do*. They never touch the model catalog.
+These decide what the agent can *do*. No built-in registers a model through
+them; a contract says external plugins should not either, which the guard below
+only enforces for agents so far.
 
-## The rule
+## This seam is not enforced for external plugins
 
-> A CyberCode feature plugin uses the feature side only. It reads
-> `catalog`/`integration`/`aisdk` exclusively through what the host already
-> resolves for it, and never registers a provider or a model.
+An earlier version of this document claimed external plugins receive only
+`{ client, serverUrl }` and therefore cannot reach capabilities. That is true of
+the V1 Promise signature (`packages/plugin/src/index.ts:56-74`) but **false** of
+the v2 Promise plugin, which `PluginPromise.fromPromise` bridges into the full
+`PluginContext` (`promise.ts:45-88`, handed over at `promise.ts:90`). A package
+listed in `plugins` receives the same `agent`, `catalog`, `integration` and
+`aisdk` surfaces a built-in gets.
 
-The reason is concrete. `State.create` registers transforms with a scope
-finalizer (`state.ts:89-124`), so `PluginV2.Service.remove` closes the plugin
-scope and **disposes every transform that plugin registered**
-(`plugin.ts:55-60`). A feature plugin that wrote into the catalog could therefore
-delete model registrations for everybody the moment it was disabled or reloaded.
-Feature-side drafts are rebuilt from scratch on each materialize, so the same
-removal is harmless there.
+The one boundary that is now enforced is the primary-agent one, in
+`guardExternalAgents` (`promise.ts`):
 
-Provider plugins have the opposite lifecycle requirement and are already handled
-by the built-ins: `ConfigProviderPlugin`, `ModelsDevPlugin` and `ProviderPlugins`
-in `plugin/internal.ts:110-121`.
+- setting the default agent pointer is refused
+- rewriting or removing an existing primary agent is refused
+- creating a new agent is allowed, at any mode
+
+Creating an agent is allowed because the default pointer is guarded separately,
+so a plugin can offer candidates without installing one as the session default.
+Creating a primary-mode agent is therefore possible but inert. Tightening that
+later means changing one predicate.
+
+`catalog`, `integration` and `aisdk` are deliberately **not** narrowed yet.
+Narrowing them would break provider plugins loaded from config, which is a
+separate decision.
+
+## Why the agent boundary matters at all
+
+`State.create` registers transforms with a scope finalizer
+(`state.ts:89-124`), so `PluginV2.Service.remove` closes the plugin scope and
+**disposes every transform that plugin registered** (`plugin.ts:55-60`). A plugin
+that wrote into the catalog could therefore delete model registrations for
+everybody the moment it was disabled or reloaded. Feature-side drafts are rebuilt
+from scratch on each materialize, so the same removal is harmless there.
 
 ## Enabled means different things for plugins and providers
 
@@ -89,7 +108,8 @@ type CyberCodePlugin = {
 }
 ```
 
-Rules, all of which are already enforced by the host:
+Rules. The first four are enforced by the host; the last is enforced by
+`guardExternalAgents`:
 
 1. **ID** is domain-prefixed so a feature plugin can never be mistaken for a
    provider plugin in a log line.
@@ -100,7 +120,21 @@ Rules, all of which are already enforced by the host:
    reads config documents itself.
 4. **Lifecycle is the host's.** Load, reload and unload are `PluginV2.add`,
    `remove` and `wait`. A plugin does not manage its own scope.
-5. **No model registration.** Not now, not later, not behind a flag.
+5. **No model registration.** Policy only for now — an external plugin still
+   receives `catalog`, `integration` and `aisdk`. Narrowing those needs a
+   provider-plugins-from-config path first, so it is a separate decision.
+6. **No primary-agent identity.** Setting the default pointer, and rewriting or
+   removing an existing primary agent, are refused at load time.
+
+## Decisions taken
+
+1. **Built-ins register through `plugin/internal.ts`.** Matches how the built-ins
+   load and costs nothing. A published package stays a later step.
+2. **Options stay `Record<string, unknown>`** for v1. Typed per-plugin option
+   schemas are a later refinement.
+3. **External plugins are subagent-only for v1**, enforced by
+   `guardExternalAgents`. Creating a new agent remains allowed but inert, since
+   the default pointer is separately guarded.
 
 ## Not building
 
@@ -111,15 +145,12 @@ Rules, all of which are already enforced by the host:
 - Per-plugin enable/disable with its own lifecycle.
 - Any catalog or integration access for feature plugins.
 
-## Open decisions
+## Still open
 
-1. **Where a first plugin lives.** `plugins: ["cybercode-pentest-web"]` from npm
-   is the existing path, but this fork has not published anything. Bundling the
-   first plugins through `plugin/internal.ts` matches how the built-ins load and
-   costs nothing.
-2. **Options shape.** Free-form `Record<string, unknown>` today. Typed option
-   schemas per plugin are the obvious later step, not a starting point.
-3. **Whether feature plugins may publish agents at all.** `agent.transform` can
-   define primary agents, which is more reach than a pentest helper needs.
-   Restricting to subagents is a decision worth making before the first plugin
-   ships, not after.
+1. **Whether external plugins may reach `catalog` at all.** Right now they can, and
+   the disposal semantics make that risky. Narrowing it means deciding what a
+   provider plugin loaded from config looks like.
+2. **Whether creating a primary-mode agent should be refused**, not just
+   installing one as the default. One predicate in `guardExternalAgents`.
+3. **Where the first CyberCode plugin's options are validated.** Nothing
+   validates `Record<string, unknown>` today.
