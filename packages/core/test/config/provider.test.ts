@@ -87,6 +87,87 @@ describe("ConfigProviderPlugin.Plugin", () => {
     }),
   )
 
+  it.effect("satisfies the exact predicate SessionRunnerModel.resolve uses", () =>
+    // Regression: resolve() picks its model with
+    //   catalog.model.available().find(m => m.providerID === session.model.providerID && m.id === session.model.id)
+    // and reports ModelUnavailable when that find misses. A provider that is
+    // registered and available must satisfy that predicate, or a perfectly valid
+    // configured model is rejected as unavailable.
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          "9router": {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "http://127.0.0.1:20178/v1", apiKey: "sk-test" },
+            models: { "oc/big-pickle": { name: "oc/big-pickle" } },
+          },
+        },
+      } as never)
+      const config = Config.Service.of({
+        entries: () =>
+          Effect.succeed([new Config.Document({ type: "document", info: decode(migrated) }) as never]),
+      })
+      yield* addPlugin(config)
+
+      const providerID = ProviderV2.ID.make("9router")
+      const modelID = ModelV2.ID.make("oc/big-pickle")
+      const candidates = (yield* catalog.model.available()).filter(
+        (m) => m.providerID === providerID && m.id === modelID,
+      )
+      // Report what actually landed, so a rejection names the culprit.
+      const allNine = (yield* catalog.model.all()).filter((m) => m.providerID === providerID)
+      expect({
+        candidateIds: candidates.map((m) => String(m.id)),
+        candidateEnabled: candidates.map((m) => m.enabled),
+        registeredNineIds: allNine.map((m) => String(m.id)),
+        availableNineIds: (yield* catalog.model.available())
+          .filter((m) => m.providerID === providerID)
+          .map((m) => String(m.id)),
+      }).toEqual({
+        candidateIds: ["oc/big-pickle"],
+        candidateEnabled: [true],
+        registeredNineIds: ["oc/big-pickle"],
+        availableNineIds: ["oc/big-pickle"],
+      })
+    }),
+  )
+
+  it.effect("survives a catalog reload after the plugin scope closes", () =>
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          "9router": {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "http://127.0.0.1:20178/v1", apiKey: "sk-test" },
+            models: { "oc/big-pickle": { name: "oc/big-pickle" } },
+          },
+        },
+      } as never)
+      const config = Config.Service.of({
+        entries: () =>
+          Effect.succeed([new Config.Document({ type: "document", info: decode(migrated) }) as never]),
+      })
+      yield* addPlugin(config)
+
+      const providerID = ProviderV2.ID.make("9router")
+      const before = (yield* catalog.model.available())
+        .filter((m) => m.providerID === providerID)
+        .map((m) => String(m.id))
+
+      // A reload rebuilds state from initial() and re-applies whatever transforms
+      // are still registered. If a finished plugin scope disposed its transform,
+      // the configured provider disappears here.
+      yield* catalog.reload()
+
+      const after = (yield* catalog.model.available())
+        .filter((m) => m.providerID === providerID)
+        .map((m) => String(m.id))
+      expect({ before, after }).toEqual({ before: ["oc/big-pickle"], after: ["oc/big-pickle"] })
+    }),
+  )
+
   it.effect("keeps configured model variant bodies unchanged", () =>
     Effect.gen(function* () {
       const catalog = yield* Catalog.Service
